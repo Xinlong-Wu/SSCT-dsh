@@ -1,0 +1,134 @@
+name: Upstream release
+
+# Downstream-fork automation, the second half of Upstream sync: once a
+# sync/upstream-<tag> PR merges into master (or when Upstream sync dispatches a
+# backfill for a release master already carries), tag master with the upstream
+# dsh-v<version> tag and mirror the upstream GitHub Release — same title,
+# notes, and pre-release flag. Writes go through the UPSTREAM_SYNC_TOKEN PAT
+# (see upstream-sync.yml for why GITHUB_TOKEN must not own these writes).
+# Tagging master triggers no other workflow: every publish workflow in this
+# repository is workflow_dispatch-only, so no publication cascade can start.
+#
+# SECURITY — keep the pull_request trigger, never pull_request_target: closed
+# events carry only the fork's own metadata, but a target variant would still
+# run base-repo secrets for any PR (see e2e.yml for the same rule).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream release tag to mirror (dsh-v<version>).
+        type: string
+        required: true
+  pull_request:
+    types: [closed]
+
+# A backfill dispatch and the merge event of the same release can race; the
+# second run exits through the release-exists gate below.
+concurrency:
+  group: upstream-release
+  cancel-in-progress: false
+
+# Least privilege: writes are performed by the UPSTREAM_SYNC_TOKEN PAT, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: deepseek-ai/deepseek-harness
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.base.ref == 'master' &&
+       startsWith(github.event.pull_request.head.ref, 'sync/upstream-'))
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      DISPATCH_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Resolve and validate the release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$DISPATCH_TAG"
+          else
+            tag="${GITHUB_HEAD_REF#sync/upstream-}"
+          fi
+          if [[ ! "$tag" =~ ^dsh-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Refusing to mirror unexpected tag '$tag'; expected dsh-v<version>."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#dsh-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: master
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Record what already exists on this fork
+        id: existing
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "tag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=false" >> "$GITHUB_OUTPUT"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists on this fork; nothing to mirror."
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail loudly unless master sits at the release version
+        if: steps.existing.outputs.release != 'true'
+        run: |
+          set -euo pipefail
+          version="${{ steps.tag.outputs.version }}"
+          master_version="$(jq -r .version package.json)"
+          if [ "$master_version" != "$version" ]; then
+            echo "::error::Master carries version $master_version but the release tag expects $version; refusing to tag or mirror."
+            exit 1
+          fi
+
+      - name: Point the release tag at master
+        if: steps.existing.outputs.release != 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          gh auth setup-git
+          if [ "${{ steps.existing.outputs.tag }}" = "true" ]; then
+            git fetch origin --no-tags "refs/tags/$tag:refs/tags/$tag"
+            if [ "$(git rev-parse "$tag^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::Tag $tag already exists on this fork and does not point at master; refusing to mirror onto it."
+              exit 1
+            fi
+            echo "Tag $tag already points at master."
+          else
+            git tag "$tag" HEAD
+            git push origin "$tag"
+          fi
+
+      - name: Mirror the upstream GitHub Release
+        if: steps.existing.outputs.release != 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          gh release view "$tag" --repo "$UPSTREAM_REPO" \
+            --json name,body,isPrerelease > upstream-release.json
+          jq -r '.body // ""' upstream-release.json > release-notes.md
+          name="$(jq -r '.name // empty' upstream-release.json)"
+          name="${name:-$tag}"
+          flags=(--verify-tag --title "$name" --notes-file release-notes.md)
+          if [ "$(jq -r .isPrerelease upstream-release.json)" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$tag" "${flags[@]}"
+          echo "Mirrored upstream release $tag onto this fork."

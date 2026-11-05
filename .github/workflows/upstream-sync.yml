@@ -1,0 +1,166 @@
+name: Upstream sync
+
+# Downstream-fork automation: mirror new upstream dsh releases into this fork.
+# Every third day (and on manual dispatch) the workflow resolves the newest
+# non-draft upstream release (pre-releases included) tagged dsh-v<version> and:
+#
+#   1. the tag already exists on this fork -> nothing to do;
+#   2. the tag commit is already on master and master sits at that version ->
+#      dispatch upstream-release.yml to backfill the tag and the mirrored
+#      GitHub Release (the fork started with no tags at all);
+#   3. the tag commit is absent from master -> push a sync/upstream-<tag>
+#      branch reset exactly to the upstream tag and open a PR into master
+#      armed with GitHub-native auto-merge, so the merge lands only after the
+#      required CI checks pass. A conflicted PR (fork-private commits on
+#      master) stays open, unarmed, until a human resolves it by hand.
+#
+# All writes go through the UPSTREAM_SYNC_TOKEN PAT. The built-in GITHUB_TOKEN
+# must not create the branch or the PR: pull requests opened with it do not
+# trigger pull_request workflows, so CI would never run and auto-merge would
+# fire immediately. Auto-merge additionally requires the repository settings
+# documented in .github/AGENTS.md (Allow auto-merge plus required checks on
+# master). This is deliberate fork-owned automation; it intentionally does not
+# follow the upstream "CI never writes to the repository" release principle.
+#
+# Note: scheduled triggers are auto-disabled after 60 days of repository
+# inactivity; manual dispatch acts as a backstop.
+on:
+  workflow_dispatch:
+  schedule:
+    # 20:30 UTC every third day = 04:30 Asia/Shanghai — off the top-of-hour cron stampede.
+    # Day-of-month */3 runs one day early after a 31-day month; runs are idempotent.
+    - cron: '30 20 */3 * *'
+
+# Never overlap two sync runs; the tag-exists check makes each run idempotent.
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+# Least privilege: writes are performed by the UPSTREAM_SYNC_TOKEN PAT, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: deepseek-ai/deepseek-harness
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve the newest upstream release
+        id: resolve
+        run: |
+          set -euo pipefail
+          tag="$(gh api "repos/$UPSTREAM_REPO/releases" \
+            --jq '[.[] | select(.draft == false) | select(.tag_name | startswith("dsh-v"))][0].tag_name')"
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::$UPSTREAM_REPO exposes no non-draft dsh-v release."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#dsh-v}" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream release $tag."
+
+      - name: Record whether this fork already carries the release tag
+        id: missing
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists on this fork; nothing to sync."
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Full history: the ancestor check below walks through fork-side merge
+      # commits that a shallow master fetch would not carry as objects.
+      - uses: actions/checkout@v7.0.1
+        if: steps.missing.outputs.missing == 'true'
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide between backfill, skip, and sync PR
+        id: decide
+        if: steps.missing.outputs.missing == 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          version="${{ steps.resolve.outputs.version }}"
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch upstream --no-tags "refs/tags/$tag:refs/tags/$tag"
+          if git merge-base --is-ancestor "$tag" origin/master; then
+            master_version="$(git show origin/master:package.json | jq -r .version)"
+            if [ "$master_version" = "$version" ]; then
+              gh workflow run upstream-release.yml --ref master -f tag="$tag"
+              echo "Master already carries $tag at version $version; dispatched upstream-release.yml to backfill the tag and the mirrored Release."
+              echo "action=backfill" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Master ($master_version) does not sit at upstream release $tag ($version); nothing to sync."
+              echo "action=none" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "action=pr" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the sync branch reset to the upstream tag
+        if: steps.decide.outputs.action == 'pr'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          branch="sync/upstream-$tag"
+          gh auth setup-git
+          git checkout -B "$branch" "$tag"
+          expected="$(git ls-remote "https://github.com/$GH_REPO.git" "refs/heads/$branch" | cut -f1)"
+          if [ -n "$expected" ]; then
+            git push --force-with-lease="refs/heads/$branch:$expected" origin "$branch"
+          else
+            git push origin "$branch"
+          fi
+
+      - name: Open the sync PR or reuse the open one
+        if: steps.decide.outputs.action == 'pr'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          branch="sync/upstream-$tag"
+          existing="$(gh pr list --head "$branch" --base master --state open --json url --jq '.[0].url // ""')"
+          if [ -n "$existing" ]; then
+            echo "PR already open: $existing"
+            exit 0
+          fi
+          body="Auto-generated by the [Upstream sync](https://github.com/$GH_REPO/actions/workflows/upstream-sync.yml) workflow.
+
+          Mirrors the upstream release \`$tag\` ([upstream release notes](https://github.com/$UPSTREAM_REPO/releases/tag/$tag)) into this fork. The branch is reset exactly to the upstream tag. Auto-merge is armed and fires only after the required CI checks (\`all checks passed\`, \`python checks passed\`) pass; on merge, the Upstream release workflow tags master and mirrors the GitHub Release."
+          gh pr create --base master --head "$branch" \
+            --title "sync(upstream): mirror $tag" --body "$body"
+
+      - name: Arm GitHub-native auto-merge
+        if: steps.decide.outputs.action == 'pr'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          branch="sync/upstream-$tag"
+          state="$(gh pr view "$branch" --json state --jq .state)"
+          if [ "$state" = "MERGED" ]; then
+            echo "Sync PR for $tag already merged."
+            exit 0
+          fi
+          # Mergeability is computed asynchronously; poll briefly before trusting it.
+          mergeable=UNKNOWN
+          for _ in 1 2 3 4 5 6; do
+            mergeable="$(gh pr view "$branch" --json mergeable --jq .mergeable)"
+            [ "$mergeable" != "UNKNOWN" ] && break
+            sleep 10
+          done
+          if [ "$mergeable" != "MERGEABLE" ]; then
+            echo "::notice::Sync PR for $tag reports mergeable=$mergeable; leaving it open for a human to handle."
+            exit 0
+          fi
+          gh pr merge "$branch" --auto --merge
+          echo "Auto-merge armed for $branch; it lands once the required checks pass."
