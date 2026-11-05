@@ -117,7 +117,6 @@ describe('CI workflow', () => {
     // failure it rejected before the split.
     expect(blocking.sort()).toEqual([
       'node-24',
-      'node-24-bench',
       'node-24-consumers',
       'node-24-coverage',
       'node-24-lint',
@@ -551,9 +550,10 @@ describe('CI workflow', () => {
     expect(windowsAggregate.name).toBe('windows checks passed')
     expect(windowsAggregate['runs-on']).toBe(aggregate['runs-on'])
     expect(windowsAggregate.if).toBe(aggregate.if)
-    // The benchmark lane is a required verdict input and runs alone so its
-    // wall-clock budgets never share a runner with a concurrent aggregate.
-    expect(aggregate.needs).toContain('node-24-bench')
+    // The benchmark lane is fork-disabled: its wall-clock budgets need an
+    // otherwise idle dedicated runner, which shared hosted runners are not.
+    expect(aggregate.needs).not.toContain('node-24-bench')
+    expect(node24Bench.if).toBe(false)
     expect(node24Bench.name).toBe('node 24 / benchmarks')
     expect(node24Bench.env).toBeUndefined()
     expect(node24Bench.steps).toContainEqual({
@@ -681,7 +681,7 @@ describe('CI workflow', () => {
     }
   })
 
-  it('runs required benchmarks on a four-vCPU Blacksmith runner and falls back to hosted Linux', () => {
+  it('keeps the fork-disabled benchmark lane on a four-vCPU Blacksmith runner or hosted Linux', () => {
     const workflow = loadWorkflow('.github/workflows/ci.yml')
     const benchmark = workflowJob(workflow, 'node-24-bench')
     const aggregate = workflowJob(workflow, 'all-checks-passed')
@@ -694,11 +694,11 @@ describe('CI workflow', () => {
       expect(evaluateRunsOn(benchmark['runs-on'], { vars: { DSH_CI_FAILOVER_LINUX: mode } })).toBe('ubuntu-24.04')
     }
     expect(JSON.stringify(benchmark.steps)).not.toContain('DSH_CI_FAILOVER_LINUX')
-    expect(benchmark.if).toBe("github.event_name == 'pull_request'")
+    expect(benchmark.if).toBe(false)
     expect(benchmark.needs).toBeUndefined()
     expect(benchmark['continue-on-error']).toBeUndefined()
     expect(benchmark.env).toBeUndefined()
-    expect(aggregate.needs).toContain('node-24-bench')
+    expect(aggregate.needs).not.toContain('node-24-bench')
   })
 
   it('always restores the hosted benchmark pnpm cache', () => {
