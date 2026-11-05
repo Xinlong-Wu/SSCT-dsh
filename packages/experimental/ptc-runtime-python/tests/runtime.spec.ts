@@ -4987,18 +4987,18 @@ describe('PythonPtcRuntime — hostile peer', () => {
     // exception. Linux-only RLIMIT_AS repro; on macOS the value round-trips
     // either way, but the fixture stays within the address space so it is honest.
     //
-      // `maxWallMs` is 180s, not the 20s the memory assertion alone needs: the O(depth)
-      // cursor pulls 6M elements one at a time through Python-level frames, which costs
-      // ~11s on an idle machine and more under the coverage lane's V8 instrumentation
-      // with several workers sharing a box — this fork's shared 4-core hosted runners
-      // included. This budget bounds the run without letting a loaded runner's
-      // scheduling latency read as a `timeout` — what this test asserts
-      // is the O(depth) memory shape, not a speed claim.
-      const { runtime } = await setup({ maxValueBytes: 20 * 1024 * 1024, addressSpaceMb: 384, maxWallMs: 180_000 })
-      const result = await runtime.run(runtime.resolve({ program: 'return [0] * 6_000_000', bindings: [] }))
-      expect(result.error).toBeUndefined()
-      expect(Array.isArray(result.value)).toBe(true)
-      expect((result.value as number[]).length).toBe(6_000_000)
+    // `maxWallMs` is 180s, not the 20s the memory assertion alone needs: the O(depth)
+    // cursor pulls 6M elements one at a time through Python-level frames, which costs
+    // ~11s on an idle machine and more under the coverage lane's V8 instrumentation
+    // with several workers sharing a box — this fork's shared 4-core hosted runners
+    // included. This budget bounds the run without letting a loaded runner's
+    // scheduling latency read as a `timeout` — what this test asserts
+    // is the O(depth) memory shape, not a speed claim.
+    const { runtime } = await setup({ maxValueBytes: 20 * 1024 * 1024, addressSpaceMb: 384, maxWallMs: 180_000 })
+    const result = await runtime.run(runtime.resolve({ program: 'return [0] * 6_000_000', bindings: [] }))
+    expect(result.error).toBeUndefined()
+    expect(Array.isArray(result.value)).toBe(true)
+    expect((result.value as number[]).length).toBe(6_000_000)
   }, 240_000)
 
   it('validates wide binding arguments in O(depth), not O(width)', async () => {
