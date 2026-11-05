@@ -1,0 +1,15 @@
+[Unit]
+Description=dsh web (QEMU guest; npm tree from the read-only dsh share)
+Requires=dsh-mounts.service
+After=dsh-mounts.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=dsh
+EnvironmentFile=/etc/dsh.env
+ExecStart=/usr/bin/node /mnt/dsh/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web --host 10.0.2.15 --port 10240 --no-open --trusted-host 127.0.0.1:10240
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
