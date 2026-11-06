@@ -1,0 +1,3 @@
+[submodule "plugins/dsh-github-reviewer"]
+	path = plugins/dsh-github-reviewer
+	url = https://github.com/Xinlong-Wu/dsh-github-reviewer
