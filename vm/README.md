@@ -1,5 +1,7 @@
 # dsh-vm — DeepSeek Harness web UI in a QEMU guest
 
+English | [中文](README.zh.md)
+
 The release-built image runs an Ubuntu guest under QEMU/KVM inside one
 container. The `dsh` npm tree ships inside the image at `/opt/dsh` and is
 exported read-only into the guest; host config and skills directories are
