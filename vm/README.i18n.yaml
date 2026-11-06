@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write vm/README.md
+/dsh-vm-deepseek-harness-web-ui-in-a-qemu-guest:
+  en: a45e19c6f75ed306
+  zh: 8e3989eaba205381
+/dsh-vm-deepseek-harness-web-ui-in-a-qemu-guest/run:
+  en: d1d56e0c875a4e43
+  zh: 27aee7039b398a30
+/dsh-vm-deepseek-harness-web-ui-in-a-qemu-guest/mount-contract:
+  en: c5c0a38a138337f4
+  zh: 751c8feed8806ee7
+/dsh-vm-deepseek-harness-web-ui-in-a-qemu-guest/ports-and-ssh:
+  en: 424bd7b3f6f9251a
+  zh: 974fe4b211617e34
+/dsh-vm-deepseek-harness-web-ui-in-a-qemu-guest/environment-variables:
+  en: b2a757c94c9744ad
+  zh: 073a6ff7c608b0ff
+/dsh-vm-deepseek-harness-web-ui-in-a-qemu-guest/build-and-publish:
+  en: 6b6dcb6dc60532b6
+  zh: f8562f5efa484834

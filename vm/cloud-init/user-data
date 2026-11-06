@@ -1,0 +1,83 @@
+#cloud-config
+# Cloud-init seed for the dsh QEMU guest. Rendered by vm/entrypoint.sh, which
+# substitutes __SSH_PUBKEY__, __DSH_VERSION__, __DSH_ENV_B64__, and
+# __DSH_SERVICE_B64__ before packing the NoCloud cidata ISO. The base image
+# is provisioned once per overlay: Node 24 + pnpm, the read-only 9p shares,
+# the writable home overlay, the dsh systemd service, and SSH access.
+hostname: dsh-vm
+manage_etc_hosts: true
+users:
+  - name: dsh
+    gecos: dsh VM manager
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    lock_passwd: true
+    ssh_authorized_keys:
+      - __SSH_PUBKEY__
+ssh_pwauth: false
+chpasswd:
+  expire: false
+packages:
+  - openssh-server
+write_files:
+  - path: /usr/local/sbin/dsh-mounts
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      # One-shot guest mount stage: read-only 9p shares, then the writable
+      # overlay for the dsh home. The host config directory (lowerdir) is
+      # never written; runtime state lands in the overlay upper layer.
+      set -u
+      mount_share() {
+        local tag="$1" dest="$2"
+        mkdir -p "$dest"
+        mountpoint -q "$dest" && return 0
+        mount -t 9p -o trans=virtio,version=9p2000.L,msize=131072,ro "$tag" "$dest" 2>/dev/null \
+          || echo "dsh-mounts: 9p share '$tag' not offered; $dest stays empty"
+      }
+      mount_share dsh /mnt/dsh
+      mount_share config /mnt/config
+      mount_share skills /mnt/skills
+      [ -d /mnt/dsh/lib/node_modules/@deepseek-ai/dsh ] \
+        || echo 'dsh-mounts: /mnt/dsh lacks the dsh tree; dsh.service will fail' >&2
+      install -d -o dsh -g dsh /var/lib/dsh-home/upper /var/lib/dsh-home/work /home/dsh/.dsh /home/dsh/.agents
+      mountpoint -q /home/dsh/.dsh || \
+        mount -t overlay -o 'lowerdir=/mnt/config,upperdir=/var/lib/dsh-home/upper,workdir=/var/lib/dsh-home/work' overlay /home/dsh/.dsh
+      if mountpoint -q /mnt/skills; then
+        ln -sfn /mnt/skills /home/dsh/.agents/skills
+      fi
+      chown -R dsh:dsh /home/dsh /var/lib/dsh-home
+  - path: /etc/systemd/system/dsh-mounts.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Mount dsh read-only 9p shares and the writable home overlay
+      After=local-fs.target
+      Before=dsh.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/dsh-mounts
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/modules-load.d/9p.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      9p
+      9pnet_virtio
+runcmd:
+  - echo '__DSH_ENV_B64__' | base64 -d > /etc/dsh.env && chmod 600 /etc/dsh.env
+  - echo '__DSH_SERVICE_B64__' | base64 -d > /etc/systemd/system/dsh.service
+  - curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource-setup.sh
+  - bash /tmp/nodesource-setup.sh
+  - apt-get install -y nodejs
+  - corepack enable pnpm
+  # --now: cloud-final runs after multi-user.target, so enable alone would
+  # leave both services waiting for a reboot that provisioning never needs.
+  - systemctl enable --now dsh-mounts.service dsh.service
+final_message: |
+  dsh VM ready (version __DSH_VERSION__). Web on guest 10240; SSH user "dsh" (sudo, key-only).

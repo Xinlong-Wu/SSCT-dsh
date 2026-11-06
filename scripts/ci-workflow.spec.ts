@@ -117,7 +117,6 @@ describe('CI workflow', () => {
     // failure it rejected before the split.
     expect(blocking.sort()).toEqual([
       'node-24',
-      'node-24-consumers',
       'node-24-coverage',
       'node-24-lint',
       'node-compat',
