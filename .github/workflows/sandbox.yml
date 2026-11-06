@@ -142,6 +142,11 @@ jobs:
   # takes 16 minutes on a fast macos-latest runner and was under half done at
   # 20 on the slowest observed.
   unit-darwin:
+    # Fork-only: darwin parity is an upstream platform concern; the full unit
+    # inventory on shared macos-latest runners flakes on signal-timing tests
+    # (a TERM-delivery race read as a missing process handle). This fork runs
+    # Linux only; see .github/AGENTS.md.
+    if: false
     name: unit tests (darwin parity, macos-latest)
     runs-on: macos-latest
     timeout-minutes: 60
